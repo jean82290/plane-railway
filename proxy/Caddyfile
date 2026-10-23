@@ -1,0 +1,40 @@
+# Plane's public entry point on Railway. Same routes as Plane's own proxy
+# (apps/proxy/Caddyfile.ce), with the upstreams read from variables so they
+# point at the services' Railway private domains. Railway terminates HTTPS.
+{
+	admin off
+	auto_https off
+	servers {
+		max_header_size 25MB
+		client_ip_headers X-Forwarded-For X-Real-IP
+		# Only Railway's edge and the private network can reach this proxy.
+		trusted_proxies static 0.0.0.0/0 ::/0
+	}
+}
+
+:{$PORT:8080} {
+	request_body {
+		max_size {$FILE_SIZE_LIMIT:5242880}
+	}
+
+	respond /healthz 200
+
+	redir /spaces /spaces/ permanent
+	reverse_proxy /spaces/* {$SPACE_HOST}:3000
+
+	redir /god-mode /god-mode/ permanent
+	reverse_proxy /god-mode/* {$ADMIN_HOST}:3000
+
+	reverse_proxy /live/* {$LIVE_HOST}:3000
+
+	reverse_proxy /api/* {$API_HOST}:8000
+	reverse_proxy /auth/* {$API_HOST}:8000
+	reverse_proxy /static/* {$API_HOST}:8000
+
+	# Uploads are signed for this domain and sent to the private storage
+	# service; the storage itself has no public domain.
+	reverse_proxy /{$BUCKET_NAME:uploads}/* {$STORAGE_HOST}:9000
+	reverse_proxy /{$BUCKET_NAME:uploads} {$STORAGE_HOST}:9000
+
+	reverse_proxy /* {$WEB_HOST}:3000
+}
