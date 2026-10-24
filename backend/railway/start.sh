@@ -20,9 +20,9 @@ case "$role" in
     # Creates the instance administrator from ADMIN_EMAIL / ADMIN_PASSWORD so
     # the first visitor of /god-mode/ cannot claim the instance.
     python /railway/bootstrap.py admin
-    # The official entrypoint creates the uploads bucket; make sure the
-    # storage service is reachable first.
-    python /railway/bootstrap.py wait-storage
+    # Creates the uploads bucket as soon as the storage service answers,
+    # without holding up the API if storage is still building.
+    python /railway/bootstrap.py ensure-bucket &
     exec ./bin/docker-entrypoint-api.sh
     ;;
   worker)
