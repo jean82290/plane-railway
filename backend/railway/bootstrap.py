@@ -1,9 +1,9 @@
 """Railway start-up tasks for the Plane API, run by start.sh before the
 official API entrypoint.
 
-    python /railway/bootstrap.py migrate       apply migrations, one process at a time
-    python /railway/bootstrap.py admin         create the instance administrator once
-    python /railway/bootstrap.py wait-storage  wait for the object storage service
+    python /railway/bootstrap.py migrate        apply migrations, one process at a time
+    python /railway/bootstrap.py admin          create the instance administrator once
+    python /railway/bootstrap.py ensure-bucket  create the uploads bucket once storage is up
 """
 
 import os
@@ -107,31 +107,55 @@ def create_admin():
         log(f"existing user {email} made instance administrator, password unchanged")
 
 
-def wait_for_storage(timeout=300):
+def ensure_bucket(timeout=3600):
+    """Runs in the background so the API starts even if the storage service
+    is still building; retries until the uploads bucket exists."""
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
     endpoint = os.environ.get("AWS_S3_ENDPOINT_URL", "")
+    bucket = os.environ.get("AWS_S3_BUCKET_NAME", "uploads")
     parsed = urlparse(endpoint)
     if not parsed.hostname:
-        log("AWS_S3_ENDPOINT_URL is not set, not waiting for storage")
+        log("AWS_S3_ENDPOINT_URL is not set, not creating the uploads bucket")
         return
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        region_name=os.environ.get("AWS_REGION") or "us-east-1",
+        config=boto3.session.Config(signature_version="s3v4"),
+    )
     deadline = time.monotonic() + timeout
+    delay = 5
     while True:
         try:
             socket.create_connection((parsed.hostname, port), timeout=5).close()
-            log(f"storage reachable at {parsed.hostname}:{port}")
+            try:
+                client.head_bucket(Bucket=bucket)
+                log(f"bucket '{bucket}' ready")
+            except ClientError as error:
+                if error.response.get("Error", {}).get("Code") not in ("404", "NoSuchBucket", "NotFound"):
+                    raise
+                client.create_bucket(Bucket=bucket)
+                log(f"bucket '{bucket}' created")
             return
-        except OSError as error:
+        except (OSError, BotoCoreError, ClientError) as error:
             if time.monotonic() > deadline:
-                raise SystemExit(f"plane-railway: storage {parsed.hostname}:{port} unreachable: {error}")
-            log(f"waiting for storage at {parsed.hostname}:{port} ({error})")
-            time.sleep(3)
+                log(f"gave up creating bucket '{bucket}': {error}")
+                return
+            log(f"storage not ready yet, retrying in {delay}s ({error})")
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
 
 
 COMMANDS = {
     "migrate": migrate,
     "admin": create_admin,
-    "wait-storage": wait_for_storage,
+    "ensure-bucket": ensure_bucket,
 }
 
 if __name__ == "__main__":
